@@ -77,44 +77,36 @@ async fn main() {
 
     let hosts = target_network.hosts();
 
-    let (tx, mut rx) = mpsc::channel(32);
-    let manager = tokio::spawn(async move {
-        println!("scan start");
-        let mut count = 0;
-        while let Some(host_info) = rx.recv().await {
-            match host_info {
-                HostInfo::Info { ip, mac } => println!("{ip}\t\t{mac}"),
-                HostInfo::None => (),
-            }
-            count += 1;
-            // without the following break, the loop won't end...
-            if count >= 254 {
-                break;
-            }
+    println!("start scanning..");
+    let mut recv = {
+        let (tx, rx) = mpsc::channel(64);
+        for host in hosts {
+            let interface = interface.clone();
+            let tx_clone = tx.clone();
+            tokio::spawn(async move {
+                match scan_host(host, &interface) {
+                    Some((ip, mac)) => {
+                        let info = HostInfo::Info { ip, mac };
+                        tx_clone.send(info).await.expect("failed to send result");
+                    }
+                    None => tx_clone
+                        .send(HostInfo::None)
+                        .await
+                        .expect("failed to send none result"),
+                };
+            });
+            // sleep 30~50 msec
+            thread::sleep(std::time::Duration::from_millis(50));
         }
-        println!("scan finished");
-    });
-
-    for host in hosts {
-        let interface = interface.clone();
-        let tx_clone = tx.clone();
-        tokio::spawn(async move {
-            match scan_host(host, &interface) {
-                Some((ip, mac)) => {
-                    let info = HostInfo::Info { ip, mac };
-                    tx_clone.send(info).await.expect("failed to send result");
-                }
-                None => tx_clone
-                    .send(HostInfo::None)
-                    .await
-                    .expect("failed to send none result"),
-            };
-        });
-        // sleep 30~50 msec
-        thread::sleep(std::time::Duration::from_millis(50));
+        rx
+    };
+    while let Some(host_info) = recv.recv().await {
+        match host_info {
+            HostInfo::Info { ip, mac } => println!("{ip}\t\t{mac}"),
+            HostInfo::None => (),
+        }
     }
-
-    manager.await.expect("failed to wait for results");
+    println!("complete!");
 }
 
 fn scan_host(host: Ipv4Addr, interface: &NetworkInterface) -> Option<(Ipv4Addr, MacAddr)> {
