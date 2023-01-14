@@ -111,10 +111,10 @@ async fn main() {
             };
         });
         // sleep 30~50 msec
-        thread::sleep(std::time::Duration::from_millis(30));
+        thread::sleep(std::time::Duration::from_millis(50));
     }
 
-    manager.await.unwrap();
+    manager.await.expect("failed to wait for results");
 }
 
 fn scan_host(host: Ipv4Addr, interface: &NetworkInterface) -> Option<(Ipv4Addr, MacAddr)> {
@@ -127,9 +127,10 @@ fn scan_host(host: Ipv4Addr, interface: &NetworkInterface) -> Option<(Ipv4Addr, 
     };
     let mut arp_packet = [0; ARP_PACKET_SIZE];
     let mut eth_packet = [0; ETHER_PACKET_SIZE];
-    let mut arp_packet = MutableArpPacket::new(&mut arp_packet).expect("failed");
+    let mut arp_packet = MutableArpPacket::new(&mut arp_packet).expect("failed to make arp packet");
     make_arp_req(&mut arp_packet, mac, ipv4_addr, MacAddr::zero(), ipv4_addr);
-    let mut ether_packet = MutableEthernetPacket::new(&mut eth_packet).unwrap();
+    let mut ether_packet =
+        MutableEthernetPacket::new(&mut eth_packet).expect("failed to make ether packet");
     ether_packet.set_destination(MacAddr::broadcast());
     ether_packet.set_source(mac);
     ether_packet.set_ethertype(EtherTypes::Arp);
@@ -143,9 +144,10 @@ fn scan_host(host: Ipv4Addr, interface: &NetworkInterface) -> Option<(Ipv4Addr, 
             panic!("error {}", e);
         }
     };
-    ds.send_to(ether_packet.packet(), None);
-    let Some((ip, mac)) = recieve_reply(dr) else {return None};
-    Some((ip, mac))
+    let _ = ds
+        .send_to(ether_packet.packet(), None)
+        .expect(format!("failed to send packet to {host}").as_str());
+    recieve_reply(dr)
 }
 
 fn recieve_reply(mut dr: Box<dyn DataLinkReceiver>) -> Option<(Ipv4Addr, MacAddr)> {
