@@ -1,6 +1,6 @@
-use std::env;
 use std::fmt::Display;
 use std::net::Ipv4Addr;
+use std::{env, thread};
 
 use datalink::Channel::Ethernet;
 use datalink::{DataLinkReceiver, NetworkInterface};
@@ -10,6 +10,7 @@ use pnet::packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
 use pnet::packet::Packet;
 use pnet::util::MacAddr;
 use pnet_datalink as datalink;
+use tokio::sync::mpsc;
 
 const ARP_PACKET_SIZE: usize = 28;
 const ETHER_PACKET_SIZE: usize = 42;
@@ -43,7 +44,14 @@ impl Display for InterfaceError {
     }
 }
 
-fn main() {
+#[derive(Debug)]
+enum HostInfo {
+    Info { ip: Ipv4Addr, mac: MacAddr },
+    None,
+}
+
+#[tokio::main]
+async fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() != 2 {
         println!("usege: network_scanner <network_interface>");
@@ -57,7 +65,7 @@ fn main() {
             return;
         }
     };
-    let (mac, ipv4_addr, ipv4_prefix) = match get_ipv4addr_info_from_interface(&interface) {
+    let (_, ipv4_addr, ipv4_prefix) = match get_ipv4addr_info_from_interface(&interface) {
         Ok((a, b, c)) => (a, b, c),
         Err(e) => {
             println!("{e}");
@@ -66,8 +74,57 @@ fn main() {
     };
 
     let target_network = Ipv4Net::new(ipv4_addr, ipv4_prefix).expect("failed");
+
     let hosts = target_network.hosts();
 
+    let (tx, mut rx) = mpsc::channel(32);
+    let manager = tokio::spawn(async move {
+        println!("scan start");
+        let mut count = 0;
+        while let Some(host_info) = rx.recv().await {
+            match host_info {
+                HostInfo::Info { ip, mac } => println!("{ip}\t\t{mac}"),
+                HostInfo::None => (),
+            }
+            count += 1;
+            // without the following break, the loop won't end...
+            if count >= 254 {
+                break;
+            }
+        }
+        println!("scan finished");
+    });
+
+    for host in hosts {
+        let interface = interface.clone();
+        let tx_clone = tx.clone();
+        tokio::spawn(async move {
+            match scan_host(host, &interface) {
+                Some((ip, mac)) => {
+                    let info = HostInfo::Info { ip, mac };
+                    tx_clone.send(info).await.expect("failed to send result");
+                }
+                None => tx_clone
+                    .send(HostInfo::None)
+                    .await
+                    .expect("failed to send none result"),
+            };
+        });
+        // sleep 30~50 msec
+        thread::sleep(std::time::Duration::from_millis(30));
+    }
+
+    manager.await.unwrap();
+}
+
+fn scan_host(host: Ipv4Addr, interface: &NetworkInterface) -> Option<(Ipv4Addr, MacAddr)> {
+    let (mac, ipv4_addr, _) = match get_ipv4addr_info_from_interface(&interface) {
+        Ok((a, b, c)) => (a, b, c),
+        Err(e) => {
+            println!("{e}");
+            return None;
+        }
+    };
     let mut arp_packet = [0; ARP_PACKET_SIZE];
     let mut eth_packet = [0; ETHER_PACKET_SIZE];
     let mut arp_packet = MutableArpPacket::new(&mut arp_packet).expect("failed");
@@ -77,18 +134,6 @@ fn main() {
     ether_packet.set_source(mac);
     ether_packet.set_ethertype(EtherTypes::Arp);
 
-    for host in hosts {
-        let Some((ip, mac)) = scan_host(host, &interface, &mut arp_packet, &mut ether_packet) else {continue};
-        println!("{ip}\t\t{mac}");
-    }
-}
-
-fn scan_host(
-    host: Ipv4Addr,
-    interface: &NetworkInterface,
-    arp_packet: &mut MutableArpPacket<'_>,
-    ether_packet: &mut MutableEthernetPacket<'_>,
-) -> Option<(Ipv4Addr, MacAddr)> {
     arp_packet.set_target_proto_addr(host);
     ether_packet.set_payload(arp_packet.packet());
     let (mut ds, dr) = match datalink::channel(interface, Default::default()) {

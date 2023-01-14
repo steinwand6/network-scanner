@@ -10,4 +10,5 @@ ipnet = "2.7.1"
 ipnetwork = "0.20.0"
 pnet = "0.31.0"
 pnet_datalink = "0.31.0"
+tokio = {verion="1.24.1", features=["full"]}
 
