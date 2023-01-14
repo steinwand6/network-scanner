@@ -118,7 +118,7 @@ async fn main() {
 }
 
 fn scan_host(host: Ipv4Addr, interface: &NetworkInterface) -> Option<(Ipv4Addr, MacAddr)> {
-    let (mac, ipv4_addr, _) = match get_ipv4addr_info_from_interface(&interface) {
+    let (mac, ipv4_addr, _) = match get_ipv4addr_info_from_interface(interface) {
         Ok((a, b, c)) => (a, b, c),
         Err(e) => {
             println!("{e}");
