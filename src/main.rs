@@ -10,6 +10,7 @@ use pnet::packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
 use pnet::packet::Packet;
 use pnet::util::MacAddr;
 use pnet_datalink as datalink;
+use rand::Rng;
 use tokio::sync::mpsc;
 
 const ARP_PACKET_SIZE: usize = 28;
@@ -79,24 +80,17 @@ async fn main() {
 
     println!("start scanning..");
     let mut recv = {
-        let (tx, rx) = mpsc::channel(64);
+        let (tx, rx) = mpsc::channel(128);
         for host in hosts {
             let interface = interface.clone();
             let tx_clone = tx.clone();
+
             tokio::spawn(async move {
-                match scan_host(host, &interface) {
-                    Some((ip, mac)) => {
-                        let info = HostInfo::Info { ip, mac };
-                        tx_clone.send(info).await.expect("failed to send result");
-                    }
-                    None => tx_clone
-                        .send(HostInfo::None)
-                        .await
-                        .expect("failed to send none result"),
-                };
+                let _ = tx_clone.send(scan_host(host, &interface).await).await;
             });
             // sleep 30~50 msec
-            thread::sleep(std::time::Duration::from_millis(50));
+            let rng = rand::thread_rng().gen_range(30..=50);
+            thread::sleep(std::time::Duration::from_millis(rng));
         }
         rx
     };
@@ -109,12 +103,12 @@ async fn main() {
     println!("complete!");
 }
 
-fn scan_host(host: Ipv4Addr, interface: &NetworkInterface) -> Option<(Ipv4Addr, MacAddr)> {
+async fn scan_host(host: Ipv4Addr, interface: &NetworkInterface) -> HostInfo {
     let (mac, ipv4_addr, _) = match get_ipv4addr_info_from_interface(interface) {
         Ok((a, b, c)) => (a, b, c),
         Err(e) => {
             println!("{e}");
-            return None;
+            return HostInfo::None;
         }
     };
     let mut arp_packet = [0; ARP_PACKET_SIZE];
@@ -136,27 +130,25 @@ fn scan_host(host: Ipv4Addr, interface: &NetworkInterface) -> Option<(Ipv4Addr, 
             panic!("error {}", e);
         }
     };
-    let _ = ds
-        .send_to(ether_packet.packet(), None)
-        .expect(format!("failed to send packet to {host}").as_str());
-    recieve_reply(dr)
+    ds.send_to(ether_packet.packet(), None);
+    recieve_reply(dr).await
 }
 
-fn recieve_reply(mut dr: Box<dyn DataLinkReceiver>) -> Option<(Ipv4Addr, MacAddr)> {
+async fn recieve_reply(mut dr: Box<dyn DataLinkReceiver>) -> HostInfo {
     match dr.next() {
         Ok(p) => {
-            let Some(res) = EthernetPacket::new(p) else {return None};
-            let Some(arp_reply) = ArpPacket::new(res.payload()) else {return None};
+            let Some(res) = EthernetPacket::new(p) else {return HostInfo::None};
+            let Some(arp_reply) = ArpPacket::new(res.payload()) else {return HostInfo::None};
             if arp_reply.get_operation() == ArpOperations::Reply {
-                return Some((
-                    arp_reply.get_sender_proto_addr(),
-                    arp_reply.get_sender_hw_addr(),
-                ));
+                return HostInfo::Info {
+                    ip: arp_reply.get_sender_proto_addr(),
+                    mac: arp_reply.get_sender_hw_addr(),
+                };
             }
         }
         Err(e) => print!("{e}"),
     }
-    None
+    HostInfo::None
 }
 
 fn get_ipv4addr_info_from_interface(
